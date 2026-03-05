@@ -29,7 +29,7 @@ async def websocket_predict(websocket: WebSocket):
             await websocket.close(code=4001, reason="Invalid token")
             return
         user_id = int(sub)
-    except JWTError:
+    except (JWTError, ValueError):
         await websocket.close(code=4001, reason="Invalid token")
         return
 
