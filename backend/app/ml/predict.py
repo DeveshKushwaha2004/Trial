@@ -1,9 +1,14 @@
-import torch
 import numpy as np
 import pickle
 import os
-from app.ml.model import CognitiveLoadLSTM
 from app.schemas import CognitiveDataCreate, PredictionResponse
+
+try:
+    import torch
+    from app.ml.model import CognitiveLoadLSTM
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "artifacts")
 LABELS = ["Low", "Medium", "High"]
@@ -14,6 +19,9 @@ _scaler = None
 
 def _load_model():
     global _model, _scaler
+    if not TORCH_AVAILABLE:
+        return False
+
     model_path = os.path.join(MODEL_DIR, "saved_model.pth")
     scaler_path = os.path.join(MODEL_DIR, "scaler.pkl")
 

@@ -127,28 +127,27 @@ The application uses **SQLite** with two tables managed by SQLAlchemy:
 
 ### `users`
 
-| Column          | Type         | Constraints              |
-| --------------- | ------------ | ------------------------ |
-| `id`            | Integer      | Primary Key, Auto-Inc    |
-| `username`      | String(150)  | Unique, Not Null         |
-| `email`         | String(255)  | Unique, Not Null         |
-| `hashed_password` | String     | Not Null                 |
-| `created_at`    | DateTime     | Default: `utcnow`        |
+| Column             | Type    | Constraints            |
+| ------------------ | ------- | ---------------------- |
+| `id`               | Integer | Primary Key, Auto-Inc  |
+| `name`             | String  | Not Null               |
+| `email`            | String  | Unique, Indexed, Not Null |
+| `hashed_password`  | String  | Not Null               |
 
 ### `cognitive_data`
 
-| Column              | Type         | Constraints                      |
-| ------------------- | ------------ | -------------------------------- |
-| `id`                | Integer      | Primary Key, Auto-Inc            |
-| `user_id`           | Integer      | Foreign Key → `users.id`         |
-| `timestamp`         | DateTime     | Default: `utcnow`                |
-| `typing_speed`      | Float        | Keys per minute                  |
-| `avg_dwell_time`    | Float        | Average key-hold duration (ms)   |
-| `avg_flight_time`   | Float        | Average inter-key interval (ms)  |
-| `mouse_speed`       | Float        | Pixels per second                |
-| `click_frequency`   | Float        | Clicks per minute                |
-| `idle_time`         | Float        | Seconds of inactivity            |
-| `predicted_load`    | String       | `Low` / `Medium` / `High`        |
+| Column             | Type     | Constraints                      |
+| ------------------ | -------- | -------------------------------- |
+| `id`               | Integer  | Primary Key, Auto-Inc            |
+| `user_id`          | Integer  | Foreign Key → `users.id`         |
+| `timestamp`        | DateTime | Default: `utcnow`                |
+| `typing_speed`     | Float    | Keys per second                  |
+| `speed_variance`   | Float    | Variance of inter-key speed      |
+| `backspace_rate`   | Float    | Backspace presses ÷ total keys   |
+| `mouse_distance`   | Float    | Total cursor travel (px)         |
+| `mouse_jitter`     | Float    | Direction changes in cursor path |
+| `tab_switch_count` | Float    | Number of tab-away events        |
+| `predicted_load`   | String   | `Low` / `Medium` / `High`        |
 
 ---
 
@@ -160,48 +159,60 @@ The application uses **SQLite** with two tables managed by SQLAlchemy:
 Input (6 features × sequence_length) 
         │
         ▼
-   LSTM Layer (hidden_size=64, num_layers=2, dropout=0.2)
+   LSTM Layer (hidden_size=64, num_layers=2, dropout=0.3)
         │
         ▼
-   Fully Connected Layer (64 → 3)
+   Fully Connected (64 → 32) + ReLU + Dropout(0.2)
+        │
+        ▼
+   Fully Connected (32 → 3)
         │
         ▼
    Softmax → [Low, Medium, High]
 ```
 
-| Parameter       | Value    |
-| --------------- | -------- |
-| Input features  | 6        |
-| Hidden size     | 64       |
-| LSTM layers     | 2        |
-| Output classes  | 3        |
-| Optimizer       | Adam     |
+| Parameter       | Value            |
+| --------------- | ---------------- |
+| Input features  | 6                |
+| Hidden size     | 64               |
+| LSTM layers     | 2                |
+| FC layers       | 64→32→3          |
+| Output classes  | 3                |
+| Optimizer       | Adam             |
 | Loss function   | CrossEntropyLoss |
 
 ### Rule-Based Fallback
 
-When the LSTM model file is not present, the system falls back to deterministic heuristics:
+When the LSTM model file is not present, the system falls back to a **weighted scoring heuristic**. Each feature contributes a weighted score (out of 100):
 
-| Condition | Predicted Load |
-| --------- | -------------- |
-| `typing_speed < 20` **or** `idle_time > 10` **or** `mouse_speed < 50` | **High** |
-| `typing_speed < 40` **or** `idle_time > 5` | **Medium** |
-| Otherwise | **Low** |
+| Feature           | Max Weight | Normalization Threshold |
+| ----------------- | ---------- | ----------------------- |
+| `typing_speed`    | 20         | 10.0 keys/s             |
+| `speed_variance`  | 15         | 3.0                     |
+| `backspace_rate`  | 20         | 0.5                     |
+| `mouse_jitter`    | 25         | 40 direction changes    |
+| `tab_switch_count`| 20         | 8 switches              |
+
+| Composite Score | Predicted Load |
+| --------------- | -------------- |
+| < 30            | **Low**        |
+| 30 – 59         | **Medium**     |
+| ≥ 60            | **High**       |
 
 ---
 
 ## 🔬 Feature Engineering
 
-The frontend tracker hooks (`useTracker.js`) collect raw events and compute the following features before sending them to the backend:
+The frontend tracker hook (`useTracker.js`) collects raw browser events every **5 seconds** and computes the following features before sending them to the backend:
 
-| Feature            | How It Is Computed                                           |
-| ------------------ | ------------------------------------------------------------ |
-| `typing_speed`     | Number of `keydown` events in the last window ÷ elapsed minutes |
-| `avg_dwell_time`   | Mean of (`keyup.timestamp` − `keydown.timestamp`) per key    |
-| `avg_flight_time`  | Mean of (`keydownₙ₊₁.timestamp` − `keyupₙ.timestamp`)       |
-| `mouse_speed`      | Euclidean distance between consecutive `mousemove` events ÷ Δt |
-| `click_frequency`  | Number of `click` events ÷ elapsed minutes                   |
-| `idle_time`        | Longest gap (seconds) with no keyboard or mouse events       |
+| Feature             | How It Is Computed                                                    |
+| ------------------- | --------------------------------------------------------------------- |
+| `typing_speed`      | Total `keydown` count in the window ÷ 5 seconds                      |
+| `speed_variance`    | Variance of instantaneous inter-key speeds (1 / gap between keys)    |
+| `backspace_rate`    | Backspace key presses ÷ total key presses (0–1 ratio)                |
+| `mouse_distance`    | Sum of Euclidean distances between consecutive `mousemove` positions  |
+| `mouse_jitter`      | Count of horizontal and vertical direction reversals in cursor path   |
+| `tab_switch_count`  | Number of `visibilitychange` events where the page became hidden      |
 
 All six features are sent as a JSON payload over the WebSocket connection every few seconds.
 
@@ -218,8 +229,8 @@ All six features are sent as a JSON payload over the WebSocket connection every 
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/<your-username>/Trial.git
-cd Trial
+git clone https://github.com/<your-username>/<your-repo>.git
+cd <your-repo>
 ```
 
 ### 2. Start the Backend
@@ -285,7 +296,7 @@ What the script does:
 To move beyond synthetic data and train on real student behavior:
 
 1. **Set up a labeling session** — have students perform tasks of known difficulty (e.g., easy reading vs. complex problem-solving).
-2. **Record features** — while the student works, the Dashboard tracker automatically logs `typing_speed`, `avg_dwell_time`, `avg_flight_time`, `mouse_speed`, `click_frequency`, and `idle_time` via the `/log` endpoint.
+2. **Record features** — while the student works, the Dashboard tracker automatically logs `typing_speed`, `speed_variance`, `backspace_rate`, `mouse_distance`, `mouse_jitter`, and `tab_switch_count` via the `/api/data/log` endpoint.
 3. **Assign ground-truth labels** — after each task, label the recorded data with the expected cognitive load level (`Low`, `Medium`, or `High`) based on the task difficulty and optional self-report questionnaires (e.g., NASA-TLX).
 4. **Export from SQLite** — query the `cognitive_data` table, join with your labels, and export to CSV.
 5. **Retrain** — feed the labeled CSV into a modified version of `train.py` that reads real data instead of synthetic samples.
@@ -296,42 +307,43 @@ To move beyond synthetic data and train on real student behavior:
 
 ### Authentication
 
-| Method | Endpoint       | Body                                        | Response                  |
-| ------ | -------------- | ------------------------------------------- | ------------------------- |
-| POST   | `/signup`      | `{ username, email, password }`             | `{ access_token, … }`    |
-| POST   | `/login`       | `{ email, password }`                       | `{ access_token, … }`    |
+| Method | Endpoint            | Body                              | Response                  |
+| ------ | ------------------- | --------------------------------- | ------------------------- |
+| POST   | `/api/auth/signup`  | `{ name, email, password }`       | `UserResponse` (201)      |
+| POST   | `/api/auth/login`   | `{ email, password }`             | `{ access_token, … }`    |
 
 ### Data
 
-| Method | Endpoint       | Auth     | Description                                    |
-| ------ | -------------- | -------- | ---------------------------------------------- |
-| POST   | `/log`         | Bearer   | Log a single cognitive data record             |
-| GET    | `/history`     | Bearer   | Retrieve paginated history for the current user|
-| GET    | `/summary`     | Bearer   | Aggregated statistics for the current user     |
+| Method | Endpoint            | Auth     | Description                                    |
+| ------ | ------------------- | -------- | ---------------------------------------------- |
+| POST   | `/api/data/log`     | Bearer   | Log a single cognitive data record + predict   |
+| GET    | `/api/data/history` | Bearer   | Retrieve time-filtered history (query: `days`)  |
+| GET    | `/api/data/summary` | Bearer   | Aggregated 7-day statistics for current user    |
 
 ### WebSocket
 
-| Protocol | Endpoint         | Auth   | Description                                         |
-| -------- | ---------------- | ------ | --------------------------------------------------- |
-| WS       | `/ws/predict`    | Token  | Send feature JSON, receive real-time load prediction |
+| Protocol | Endpoint         | Auth                | Description                                          |
+| -------- | ---------------- | ------------------- | ---------------------------------------------------- |
+| WS       | `/ws/predict`    | `?token=<jwt>`      | Send feature JSON, receive real-time load prediction  |
 
 **WebSocket Message Format:**
 
 ```jsonc
 // → Client sends:
 {
-  "typing_speed": 45.2,
-  "avg_dwell_time": 120.5,
-  "avg_flight_time": 85.3,
-  "mouse_speed": 340.0,
-  "click_frequency": 12.0,
-  "idle_time": 2.5
+  "typing_speed": 2.4,
+  "speed_variance": 1.82,
+  "backspace_rate": 0.15,
+  "mouse_distance": 340.0,
+  "mouse_jitter": 12,
+  "tab_switch_count": 2
 }
 
 // ← Server responds:
 {
   "predicted_load": "Medium",
-  "confidence": 0.82
+  "confidence": 0.82,
+  "load_percentage": 45.3
 }
 ```
 

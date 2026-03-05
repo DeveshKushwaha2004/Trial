@@ -24,10 +24,11 @@ async def websocket_predict(websocket: WebSocket):
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload.get("sub")
-        if user_id is None:
+        sub = payload.get("sub")
+        if sub is None:
             await websocket.close(code=4001, reason="Invalid token")
             return
+        user_id = int(sub)
     except JWTError:
         await websocket.close(code=4001, reason="Invalid token")
         return
